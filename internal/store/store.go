@@ -192,9 +192,25 @@ func (s *Store) IngestEvent(ctx context.Context, e Event) (IngestResult, error) 
 		return IngestResult{Duplicate: true}, nil
 	}
 
-	// Take the call row's lock before reading its duration, so a concurrent
-	// event for the same call cannot compute its delta from the same stale
-	// value. A call that does not exist yet returns no rows.
+	// Serialise every transaction that touches this call_id.
+	//
+	// The FOR UPDATE below can only lock a row that already exists. When two
+	// different events for the same *new* call arrive together, both read "no
+	// such call", both conclude they created it, and both add one to
+	// call_count -- leaving one row in calls and a count of two. A row lock
+	// cannot close that window because there is no row yet to lock.
+	//
+	// An advisory lock is keyed on a number rather than a row, so it works
+	// before the row exists. It is released automatically when the
+	// transaction ends. hashtext can collide, which would serialise two
+	// unrelated calls unnecessarily; that costs a little throughput and
+	// changes no result.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, e.CallID); err != nil {
+		return IngestResult{}, err
+	}
+
+	// Now read the existing duration, if any, to work out the delta.
 	var prevDuration int
 	hadCall := true
 	err = tx.QueryRow(ctx,
