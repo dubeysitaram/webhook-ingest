@@ -1,62 +1,64 @@
 # webhook-ingest
 
-A Go service that receives call-completion webhooks from our telephony provider,
-stores them, and updates per-account call statistics.
+A Go service that receives call-completion webhooks from a telephony provider,
+stores them, and maintains per-account call statistics.
 
-It is in production. It is misbehaving.
+This repository is a submission for the Convin backend take-home. The service
+shipped with a set of runtime defects that the test suite did not catch; they
+are diagnosed and fixed here. The reasoning behind each change is in
+[SOLUTION.md](SOLUTION.md).
 
-## The incident
+## What was fixed
 
-Last week operations filed this:
-
-> Duplicate call records are showing up in the dashboard, and account
-> call-counts are drifting higher than the actual number of calls. Calls are
-> landing but their recordings never get marked processed — and there's nothing
-> in the logs about it. On top of that, every time we deploy, whatever was in
-> flight seems to just disappear.
-
-Nobody has had time to look into it. That's your job.
-
-**The test suite in this repo does not cover everything that's broken.**
-
-## Your task
-
-1. **Find and fix the defects.** Start from the symptoms above. Add tests that
-   demonstrate each problem before you fix it.
-
-2. **Make ingestion idempotent.** Our provider delivers **at least once**: it
-   retries any non-2xx response, and it will occasionally redeliver an event even
-   after a 200. The `event_id` field is stable across redeliveries. Ingesting the
-   same event twice must not double-count anything.
-
-   How you guarantee that is your call. Postgres and Redis are both running and
-   connected. Pick an approach and be ready to defend it.
-
-3. **Write a short document** (`SOLUTION.md`, about half a page):
-   - What was broken, and why
-   - Why you chose your deduplication strategy over the alternatives
-   - What you would change if this had to handle 10,000 webhooks/sec
+| Defect | Fix |
+|---|---|
+| Concurrent redeliveries were both stored and both counted | Unique index on `events.event_id`, and one transaction per delivery using `ON CONFLICT DO NOTHING` |
+| Counts drifted above the real number of calls | The aggregate now counts calls, not events; a revising event applies only a duration delta |
+| Recordings were never marked processed, silently | Background work detached from the request context via `context.WithoutCancel`, with its own timeout, and failures are logged |
+| In-flight work was lost on every deploy | Background work is tracked in a `WaitGroup` and drained after `srv.Shutdown` |
+| Stats read as zero after a restart | The in-memory cache is warmed from `account_stats` before the server accepts traffic |
+| The stats cache lost increments and could crash the process | Every mutation now holds the cache's mutex |
 
 ## Running it
 
 ```bash
 docker compose up -d --build   # Postgres, Redis, and the service
 curl localhost:8080/healthz    # -> ok
-go test ./...                  # the visible test suite
+go test ./...                  # the test suite
 ```
 
 `make reset` tears everything down, wipes the volumes, and starts fresh.
-
-**Already running Postgres or Redis locally?** The published host ports are
-overridable — copy `.env.example` to `.env` and change `APP_PORT`,
-`POSTGRES_PORT`, `REDIS_PORT`, then point `DATABASE_URL` and `REDIS_ADDR` at
-your chosen ports so `go test ./...` finds them.
+Migrations are plain SQL in `migrations/`, applied by Postgres on the first
+start of an empty volume — **run `make reset` after pulling, so that
+`002_event_id_unique.sql` is applied.**
 
 Tests run against the Postgres started by Compose, so bring the stack up first.
 They clean up after themselves and are safe to run repeatedly.
 
-Migrations are plain SQL in `migrations/`, applied by Postgres on first start of
-an empty volume. Add new ones as `002_*.sql`, `003_*.sql` and run `make reset`.
+### Running the tests
+
+```bash
+go test ./...          # full suite
+go test ./... -race    # recommended: several tests target concurrency defects
+```
+
+The concurrency tests warm the HTTP and pgx connection pools before their
+burst. Without that, connections are established lazily one at a time, which
+staggers the requests enough that they stop overlapping — and the test then
+passes for the wrong reason.
+
+### Already running Postgres or Redis locally?
+
+The published host ports are overridable. Copy `.env.example` to `.env` and
+change `APP_PORT`, `POSTGRES_PORT`, `REDIS_PORT`.
+
+Note that `.env` is read by Docker Compose, not by Go. To point `go test ./...`
+at the same database, export the connection strings in your shell as well:
+
+```bash
+export DATABASE_URL="postgres://webhook:webhook@localhost:5433/webhook?sslmode=disable"
+export REDIS_ADDR="localhost:6379"
+```
 
 ## The API
 
@@ -76,8 +78,12 @@ an empty volume. Add new ones as `002_*.sql`, `003_*.sql` and run `make reset`.
 
 `status` is one of `completed`, `failed`, `no_answer`.
 
+Delivery is idempotent on `event_id`. A redelivery is acknowledged with `200`
+and changes nothing, including when several copies arrive simultaneously.
+
 **`GET /accounts/{account_id}/stats`** — returns the in-memory aggregate. The
-durable copy of the same numbers lives in the `account_stats` table.
+durable copy of the same numbers lives in the `account_stats` table, and the
+cache is warmed from it at startup.
 
 **`GET /healthz`**
 
@@ -90,26 +96,14 @@ internal/store/       Postgres repository
 internal/stats/       in-memory per-account totals
 internal/ingest/      webhook ingestion and processing
 internal/httpapi/     routes and handlers
-internal/redisclient/ Redis connection (connected; nothing uses it yet)
+internal/redisclient/ Redis connection
 internal/testutil/    shared test setup
 migrations/           schema
 ```
 
-## Ground rules
+## Notes on the approach
 
-- **Time box: 4 hours.** We would rather see two defects genuinely understood
-  than four papered over. If you run out of time, say what you would have done
-  next in `SOLUTION.md`.
-- **AI tools are allowed.** Use whatever you normally use. We will spend 30
-  minutes walking through your code together afterwards, so make sure you can
-  explain why every change you kept is correct.
-- Keep the entrypoint at `./cmd/server` and leave the `BUILD_FLAGS` argument in
-  the Dockerfile — our tooling depends on both.
-- The infrastructure works out of the box. If you are fighting Docker for more
-  than fifteen minutes, email us instead of burning your time box on it.
-
-## Submitting
-
-Push to a **public GitHub repository** and send us the link. Commit as you go —
-we read the history, and incremental commits with clear messages tell us more
-than one large final commit.
+The public API of every package is unchanged: existing exported functions keep
+their signatures and behaviour, and new functionality was added alongside them
+rather than replacing them. The entrypoint stays at `./cmd/server` and the
+Dockerfile's `BUILD_FLAGS` argument is untouched.
