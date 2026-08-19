@@ -32,6 +32,9 @@ func (h *Handler) postCallWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set before WriteHeader: headers written afterwards are ignored, which is
+	// why this response went out untyped while the error paths did not.
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"accepted"}`))
 }

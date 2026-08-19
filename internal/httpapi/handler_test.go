@@ -85,3 +85,27 @@ func TestAccountStatsEndpointRespondsJSON(t *testing.T) {
 		t.Fatalf("Content-Type is %q, want application/json", ct)
 	}
 }
+
+// TestWebhookSuccessRespondsJSON pins the Content-Type on the accepted path.
+//
+// The error paths set the header, the success path did not: it called
+// WriteHeader first, and headers set after that are ignored. The response
+// body has always been JSON, so clients were being handed JSON typed as
+// text/plain.
+func TestWebhookSuccessRespondsJSON(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+
+	body := fmt.Sprintf(
+		`{"event_id":%q,"call_id":%q,"account_id":%q,"status":"completed",`+
+			`"duration_sec":143,"occurred_at":"2026-08-13T09:12:00Z"}`,
+		eventID, callID, accountID)
+
+	resp := post(t, srv.URL+"/webhooks/calls", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type is %q, want application/json", ct)
+	}
+}
