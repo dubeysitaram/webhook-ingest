@@ -40,6 +40,14 @@ func main() {
 	defer func() { _ = rdb.Close() }()
 
 	svc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	// Load the durable totals before serving, otherwise the stats endpoint
+	// reports zero for every account until new webhooks rebuild the numbers.
+	if err := svc.WarmCache(ctx); err != nil {
+		log.Error("warm stats cache", "err", err)
+		os.Exit(1)
+	}
+
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewRouter(svc, log)}
 
 	go func() {

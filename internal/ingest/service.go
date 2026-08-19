@@ -41,6 +41,31 @@ func (s *Service) Stats(accountID string) stats.AccountStats {
 	return s.cache.Get(accountID)
 }
 
+// WarmCache loads the durable per-account totals from Postgres into the
+// in-memory cache. Call it at startup, before serving traffic.
+//
+// The cache is created empty on every boot while the real numbers sit in
+// account_stats, so without this the stats endpoint reports zero for every
+// established account after a deploy until new webhooks rebuild the totals.
+func (s *Service) WarmCache(ctx context.Context) error {
+	totals, err := s.store.AllAccountStats(ctx)
+	if err != nil {
+		return err
+	}
+
+	warmed := make(map[string]stats.AccountStats, len(totals))
+	for accountID, st := range totals {
+		warmed[accountID] = stats.AccountStats{
+			CallCount:        st.CallCount,
+			TotalDurationSec: st.TotalDurationSec,
+		}
+	}
+	s.cache.Load(warmed)
+
+	s.log.Info("stats cache warmed", "accounts", len(warmed))
+	return nil
+}
+
 // Ingest stores a delivery and kicks off processing. Processing runs
 // asynchronously so the provider gets a fast acknowledgement.
 //

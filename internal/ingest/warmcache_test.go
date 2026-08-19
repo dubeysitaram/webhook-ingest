@@ -16,6 +16,9 @@ import (
 func bootService(t *testing.T) (*ingest.Service, *store.Store) {
 	t.Helper()
 	svc, st := newService(t)
+	if err := svc.WarmCache(context.Background()); err != nil {
+		t.Fatalf("WarmCache: %v", err)
+	}
 	return svc, st
 }
 
