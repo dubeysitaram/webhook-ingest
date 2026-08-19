@@ -18,6 +18,11 @@ are diagnosed and fixed here. The reasoning behind each change is in
 | In-flight work was lost on every deploy | Background work is tracked in a `WaitGroup` and drained after `srv.Shutdown` |
 | Stats read as zero after a restart | The in-memory cache is warmed from `account_stats` before the server accepts traffic |
 | The stats cache lost increments and could crash the process | Every mutation now holds the cache's mutex |
+| Concurrent events for one *new* call were each counted | `pg_advisory_xact_lock` on the `call_id`, since a row lock cannot cover the window before the row exists |
+| The migration collapsed duplicate events but left the totals it had inflated | Migration 002 recomputes `account_stats` from `calls` |
+| A correction that carried no recording erased the stored URL | The URL is kept when an event omits it; `recording_processed` clears only when it genuinely changes |
+| Startup could hang forever, and drain shared its deadline with HTTP shutdown | Bounded cache warming, and a separate budget for in-flight work |
+| A failed listener skipped every deferred close | The entrypoint unwinds through `run` instead of calling `os.Exit` from a goroutine |
 
 ## Running it
 

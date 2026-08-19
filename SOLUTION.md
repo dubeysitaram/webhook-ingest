@@ -23,9 +23,35 @@ The three durable writes were also independent statements. A failure after the
 event row committed left the aggregates un-updated, and the provider's retry
 was then dismissed as a duplicate — so the count stayed wrong permanently.
 
-Defects 1, 3, 5 and 6 each have a test that fails before the fix and passes
-after. Defect 4's test is committed with its fix, because the assertion needs
-the `Wait` method that is itself the fix.
+### Found while reviewing the fixes
+
+| # | Defect | Symptom it caused |
+|---|---|---|
+| 7 | Migration 002 collapses the duplicate `events` rows but left `account_stats` alone. Those duplicates had already inflated the totals, so the migration meant to end the drift left every drifted number exactly as it was. | The dashboard stays wrong after the fix ships |
+| 8 | The `calls` upsert applied `EXCLUDED.recording_url` unconditionally, so a correction that carried no recording erased the stored URL while `recording_processed` stayed true. The mirror case leaked too: a genuinely replaced recording kept the flag describing the old URL, so the new audio was never fetched. | Recordings unreachable, or silently never processed |
+| 9 | `WarmCache` ran on `context.Background()`. An unreachable Postgres hung the boot forever, with no listener and no error. | A deploy that never becomes ready and never says why |
+| 10 | `svc.Wait` shared one 10s budget with `srv.Shutdown`. A slow HTTP drain left the recording work whatever remained — discarding the work defect 4's fix exists to preserve. | In-flight work still lost, on the slow deploys that need it most |
+| 11 | `os.Exit` from the listener goroutine skipped every pending `defer`, so a failed `ListenAndServe` closed neither the Postgres pool nor the Redis client. | Connections leaked on a failed start |
+| 12 | `postCallWebhook` set `Content-Type` after `WriteHeader`, and headers set afterwards are discarded, so the one endpoint the provider calls returned JSON typed as `text/plain` while every error path was typed correctly. | The webhook endpoint's success response was mistyped |
+
+Defect 7 is the one worth dwelling on. Every other fix here stops the numbers
+from going wrong in future; none of them repairs the numbers that are already
+wrong. `calls` is the authority — one row per call, holding its latest duration
+— so the migration now recomputes the aggregate from it, restoring the same
+invariant the application maintains incrementally.
+
+Defects 1, 3, 5, 6, 8, 12 and the second pass on 2 each have a test that fails
+before the fix and passes after. Defect 4's test is committed with its fix,
+because the assertion needs the `Wait` method that is itself the fix. Defects
+7 and 9–11 are verified by inspection and by exercising the running stack
+rather than by unit tests: they concern process startup, shutdown ordering and
+a migration, none of which the in-process harness can reach.
+
+The four store methods `IngestEvent` replaced — `EventExists`, `InsertEvent`,
+`UpsertCall`, `IncrementAccountStats` — are kept for API compatibility but are
+now marked deprecated, each saying which defect it embodies.
+`IncrementAccountStats` still adds one per event, so a future caller reaching
+for it by name would reintroduce defect 2.
 
 ## Why this deduplication strategy
 
@@ -89,7 +115,9 @@ no `ReadHeaderTimeout` on the server.
   it regardless. `calls WHERE recording_processed = false` is already a durable work
   queue; a sweep at startup and on a ticker would make the work crash-safe. A
   redelivery currently does not retry a failed recording, since it is correctly
-  treated as a duplicate — the reconciler is what closes that gap.
+  treated as a duplicate — the reconciler is what closes that gap. Defect 8's fix
+  feeds it: a replaced recording now clears `recording_processed`, so the same
+  sweep picks up the new audio without any special case.
 - **Out-of-order deliveries.** `UpsertCall` applies whatever arrives last. A delayed
   older event can overwrite a newer status. `occurred_at` is on the payload but not
   in `calls`; storing it and refusing to apply an older event would fix it.
