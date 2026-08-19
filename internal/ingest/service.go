@@ -16,6 +16,9 @@ import (
 // recordingWork stands in for downloading and transcoding a recording.
 const recordingWork = 50 * time.Millisecond
 
+// recordingTimeout bounds that work once it is detached from the request.
+const recordingTimeout = 30 * time.Second
+
 // Service ingests webhook deliveries.
 type Service struct {
 	store *store.Store
@@ -73,19 +76,45 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 
 	// Recordings are slow to fetch, so that part does not block the provider.
 	if rec.RecordingURL != "" {
-		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
-				// TODO: handle
-			}
-		}()
+		s.startRecording(ctx, rec)
 	}
 
 	return nil
 }
 
+// startRecording runs the recording work in the background.
+//
+// The context is deliberately detached from the request. net/http cancels a
+// request's context the moment its handler returns, and this handler returns
+// immediately by design, so the work inherited a context that was already
+// cancelled and every database write failed with "context canceled".
+// context.WithoutCancel keeps any request-scoped values while dropping that
+// cancellation, and a timeout of its own stops the work hanging forever.
+//
+// Failures are logged. Previously the error was assigned and discarded in an
+// empty branch, so a recording that never processed left no trace at all.
+func (s *Service) startRecording(ctx context.Context, rec store.Event) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordingTimeout)
+		defer cancel()
+
+		if err := s.processRecording(ctx, rec); err != nil {
+			s.log.Error("process recording",
+				"call_id", rec.CallID, "event_id", rec.EventID, "err", err)
+			return
+		}
+		s.log.Info("recording processed", "call_id", rec.CallID)
+	}()
+}
+
 // processRecording downloads and transcodes the call recording, then marks
 // the call as done.
 func (s *Service) processRecording(ctx context.Context, rec store.Event) error {
-	time.Sleep(recordingWork)
+	// Wait out the stand-in work, but give up early if the context ends.
+	select {
+	case <-time.After(recordingWork):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return s.store.MarkRecordingProcessed(ctx, rec.CallID)
 }
