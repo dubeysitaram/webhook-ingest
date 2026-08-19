@@ -11,6 +11,14 @@
 | 5 | The stats cache was created empty at boot and nothing loaded `account_stats` into it, while `GET /accounts/{id}/stats` serves that cache. | Established accounts reported zero after a deploy |
 | 6 | `Cache.Record` mutated the map holding no lock, though `Cache` carries a mutex and `Get` takes it. Increments were lost, and concurrent Go map writes abort the whole process. | Undercounting, and a latent crash under load |
 
+Defect 2 needed a second pass. Counting calls rather than events was only
+correct for deliveries that arrived one after another: `SELECT ... FOR UPDATE`
+can only lock a row that already exists, so two different events for the same
+*new* call could both read "no such call" and both count it. `IngestEvent`
+takes `pg_advisory_xact_lock(hashtext(call_id))` before computing the delta —
+an advisory lock is keyed on a number rather than a row, so it works before the
+row exists.
+
 The three durable writes were also independent statements. A failure after the
 event row committed left the aggregates un-updated, and the provider's retry
 was then dismissed as a duplicate — so the count stayed wrong permanently.
