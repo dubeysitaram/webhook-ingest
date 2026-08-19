@@ -59,6 +59,12 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 func (s *Store) Close() { s.pool.Close() }
 
 // EventExists reports whether an event with this ID has already been stored.
+//
+// Deprecated: superseded by IngestEvent. Answering this question before
+// writing is what made ingestion racy: two concurrent deliveries of one event
+// both saw "no", and both went on to insert and count it. The answer is stale
+// the moment it is returned, so it cannot be the basis of a dedup decision.
+// Kept for API compatibility and used by tests; do not build on it.
 func (s *Store) EventExists(ctx context.Context, eventID string) (bool, error) {
 	var one int
 	err := s.pool.QueryRow(ctx,
@@ -73,6 +79,12 @@ func (s *Store) EventExists(ctx context.Context, eventID string) (bool, error) {
 }
 
 // InsertEvent stores the raw delivery.
+//
+// Deprecated: superseded by IngestEvent. This writes the event on its own,
+// outside any transaction, so a failure in the aggregate updates that should
+// accompany it leaves the event stored and the totals un-updated -- and the
+// provider's retry is then dismissed as a duplicate, making the loss
+// permanent. Kept for API compatibility; do not build on it.
 func (s *Store) InsertEvent(ctx context.Context, e Event) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO events (event_id, call_id, account_id, payload)
@@ -82,6 +94,12 @@ func (s *Store) InsertEvent(ctx context.Context, e Event) error {
 }
 
 // UpsertCall creates or refreshes the call record for this event.
+//
+// Deprecated: superseded by IngestEvent, which performs this upsert inside
+// the same transaction as the event insert and the aggregate update, and
+// serialises concurrent events for one call. Used alone it takes no advisory
+// lock, so callers cannot compute a correct aggregate delta around it.
+// Kept for API compatibility; do not build on it.
 func (s *Store) UpsertCall(ctx context.Context, e Event) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO calls (call_id, account_id, status, duration_sec, recording_url, updated_at)
@@ -104,6 +122,13 @@ func (s *Store) MarkRecordingProcessed(ctx context.Context, callID string) error
 }
 
 // IncrementAccountStats folds one completed call into the durable aggregate.
+//
+// Deprecated: superseded by IngestEvent. This adds one per *event*, but
+// several events can describe one call -- a later delivery correcting a
+// duration or a status -- so the count drifts above the real number of calls.
+// That is the defect the ops report described, and calling this reintroduces
+// it. IngestEvent applies a delta instead: a new call adds one, a revision
+// adds none. Kept for API compatibility; do not build on it.
 func (s *Store) IncrementAccountStats(ctx context.Context, accountID string, durationSec int) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO account_stats (account_id, call_count, total_duration_sec)
