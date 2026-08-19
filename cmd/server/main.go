@@ -60,4 +60,13 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+
+	// Shutdown only drains in-flight HTTP handlers. Recording work
+	// deliberately outlives its handler, so it has to be waited for
+	// separately or a deploy discards it.
+	if err := svc.Wait(shutdownCtx); err != nil {
+		log.Error("in-flight work did not drain before shutdown deadline", "err", err)
+	}
+
+	log.Info("stopped")
 }

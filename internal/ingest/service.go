@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -25,6 +26,9 @@ type Service struct {
 	cache *stats.Cache
 	rdb   *redis.Client
 	log   *slog.Logger
+
+	// wg tracks background recording work so shutdown can wait for it.
+	wg sync.WaitGroup
 }
 
 // New builds a Service.
@@ -94,7 +98,10 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 // Failures are logged. Previously the error was assigned and discarded in an
 // empty branch, so a recording that never processed left no trace at all.
 func (s *Service) startRecording(ctx context.Context, rec store.Event) {
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
+
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordingTimeout)
 		defer cancel()
 
@@ -105,6 +112,29 @@ func (s *Service) startRecording(ctx context.Context, rec store.Event) {
 		}
 		s.log.Info("recording processed", "call_id", rec.CallID)
 	}()
+}
+
+// Wait blocks until background work started by Ingest has finished, or until
+// ctx is done.
+//
+// Call it after the HTTP server has shut down. srv.Shutdown only drains
+// in-flight HTTP handlers, and the recording work deliberately outlives its
+// handler, so without this the process returned from main and killed
+// whatever was still running -- the "work in flight disappears on every
+// deploy" symptom.
+func (s *Service) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // processRecording downloads and transcodes the call recording, then marks
