@@ -248,13 +248,28 @@ func (s *Store) IngestEvent(ctx context.Context, e Event) (IngestResult, error) 
 		return IngestResult{}, err
 	}
 
+	// recording_url is kept when the incoming event does not carry one. An
+	// event that omits the recording is not asserting that the recording is
+	// gone -- a correction to a duration or a status simply has nothing to say
+	// about it -- and overwriting the stored URL with the empty string loses
+	// it for good while recording_processed still claims it was handled.
+	//
+	// recording_processed is cleared only when the URL actually changes to a
+	// different one, because the flag describes the recording that was
+	// processed. Leaving it set would mark audio nobody has fetched as done.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO calls (call_id, account_id, status, duration_sec, recording_url, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, now())
+		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), now())
 		 ON CONFLICT (call_id) DO UPDATE SET
 		     status        = EXCLUDED.status,
 		     duration_sec  = EXCLUDED.duration_sec,
-		     recording_url = EXCLUDED.recording_url,
+		     recording_url = COALESCE(EXCLUDED.recording_url, calls.recording_url),
+		     recording_processed = CASE
+		         WHEN EXCLUDED.recording_url IS NOT NULL
+		          AND EXCLUDED.recording_url IS DISTINCT FROM calls.recording_url
+		         THEN FALSE
+		         ELSE calls.recording_processed
+		     END,
 		     updated_at    = now()`,
 		e.CallID, e.AccountID, e.Status, e.DurationSec, e.RecordingURL); err != nil {
 		return IngestResult{}, err
